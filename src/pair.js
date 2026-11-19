@@ -8,7 +8,6 @@ const {
 const sodium = require("libsodium-wrappers");
 const archiver = require("archiver");
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
 const pino = require("pino");
@@ -17,9 +16,7 @@ const AUTH_DIR = path.join(process.cwd(), "auth_info");
 
 function required(name) {
   const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing environment variable: ${name}`);
-  }
+  if (!value) throw new Error(`Missing ${name}`);
   return value;
 }
 
@@ -27,7 +24,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ضغط ملفات جلسة واتساب
+// ضغط الجلسة
 async function createArchive() {
   return new Promise((resolve, reject) => {
     const archive = archiver("zip", {
@@ -38,16 +35,16 @@ async function createArchive() {
 
     archive.on("data", chunk => chunks.push(chunk));
     archive.on("error", reject);
-    archive.on("end", () => {
-      resolve(Buffer.concat(chunks));
-    });
+    archive.on("end", () =>
+      resolve(Buffer.concat(chunks))
+    );
 
     archive.directory(AUTH_DIR, false);
     archive.finalize();
   });
 }
 
-// تشفير الجلسة باستخدام AES-256-GCM
+// تشفير الجلسة
 function encryptSession(data) {
   const key = Buffer.from(
     required("SESSION_ENCRYPTION_KEY"),
@@ -55,7 +52,7 @@ function encryptSession(data) {
   );
 
   if (key.length !== 32) {
-    throw new Error("Encryption key must be 32 bytes.");
+    throw new Error("Encryption key must be 32 bytes");
   }
 
   const iv = crypto.randomBytes(12);
@@ -71,17 +68,15 @@ function encryptSession(data) {
     cipher.final()
   ]);
 
-  const tag = cipher.getAuthTag();
-
   return Buffer.concat([
     iv,
-    tag,
+    cipher.getAuthTag(),
     encrypted
   ]).toString("base64");
 }
 
-// حفظ الجلسة المشفرة في GitHub Secrets
-async function saveGitHubSecret(secretValue) {
+// حفظ الجلسة في GitHub Secrets
+async function saveGitHubSecret(value) {
   await sodium.ready;
 
   const token = required("GH_SECRETS_TOKEN");
@@ -96,18 +91,18 @@ async function saveGitHubSecret(secretValue) {
   const base =
     `https://api.github.com/repos/${repository}/actions/secrets`;
 
-  const keyResponse = await axios.get(
+  const response = await axios.get(
     `${base}/public-key`,
     { headers }
   );
 
   const publicKey = sodium.from_base64(
-    keyResponse.data.key,
+    response.data.key,
     sodium.base64_variants.ORIGINAL
   );
 
   const encryptedBytes = sodium.crypto_box_seal(
-    Buffer.from(secretValue, "utf8"),
+    Buffer.from(value, "utf8"),
     publicKey
   );
 
@@ -120,40 +115,28 @@ async function saveGitHubSecret(secretValue) {
     `${base}/WHATSAPP_SESSION`,
     {
       encrypted_value: encryptedValue,
-      key_id: keyResponse.data.key_id
+      key_id: response.data.key_id
     },
     { headers }
   );
 
-  console.log(
-    "Encrypted WhatsApp session saved to GitHub Secrets."
-  );
+  console.log("WhatsApp session saved to GitHub Secrets.");
 }
 
 async function main() {
   const phone = required("PAIRING_PHONE").replace(/\D/g, "");
 
   if (!/^\d{8,15}$/.test(phone)) {
-    throw new Error(
-      "Enter phone number with country code, digits only."
-    );
+    throw new Error("Invalid phone number");
   }
 
   const { state, saveCreds } =
     await useMultiFileAuthState(AUTH_DIR);
 
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    logger: pino({ level: "silent" }),
-    
-  });
-
-  sock.ev.on("creds.update", saveCreds);
-
-  let pairingRequested = false;
   let finished = false;
-  let pairingCode = false;
+  let pairingRequested = false;
+  let reconnecting = false;
+  let saveQueue = Promise.resolve();
 
   const timeout = setTimeout(() => {
     if (!finished) {
@@ -162,96 +145,144 @@ async function main() {
     }
   }, 4 * 60 * 1000);
 
-  sock.ev.on("connection.update", async update => {
-    // طلب رمز الربط بعد وصول حدث QR
-    if (
-      update.qr &&
-      !state.creds.registered &&
-      !pairingRequested
-    ) {
-      pairingRequested = true;
+  async function finishConnection(sock) {
+    if (finished) return;
 
-      try {
-        await delay(1000);
+    finished = true;
+    clearTimeout(timeout);
 
-        const code = await sock.requestPairingCode(phone);
+    try {
+      await saveQueue;
+      await saveCreds();
 
-        pairingCode = true;
+      const archive = await createArchive();
+      const encrypted = encryptSession(archive);
 
-        console.log("--------------------------------");
-        console.log("WhatsApp Pairing Code:", code);
-        console.log("--------------------------------");
-        console.log(
-          "Enter this code in WhatsApp Linked Devices."
-        );
-      } catch (error) {
-        console.error(
-          "Pairing code request failed:",
-          error.message
-        );
+      await saveGitHubSecret(encrypted);
 
-        process.exit(1);
-      }
-    }
+      console.log("--------------------------------");
+      console.log("WHATSAPP CONNECTED SUCCESSFULLY");
+      console.log("SESSION SAVED SUCCESSFULLY");
+      console.log("--------------------------------");
 
-    // نجاح الاتصال
-    if (update.connection === "open" && !finished) {
-      finished = true;
-      clearTimeout(timeout);
+      await sock.end(undefined);
+      process.exit(0);
 
-      try {
-        await delay(3000);
-
-        await saveCreds();
-
-        const archive = await createArchive();
-        const encrypted = encryptSession(archive);
-
-        await saveGitHubSecret(encrypted);
-
-        console.log("--------------------------------");
-        console.log("WhatsApp pairing completed.");
-        console.log("Session saved successfully.");
-        console.log("--------------------------------");
-
-        await sock.end(undefined);
-
-        process.exit(0);
-
-      } catch (error) {
-        console.error(
-          "Session saving failed:",
-          error.message
-        );
-
-        process.exit(1);
-      }
-    }
-
-    // إغلاق الاتصال
-    if (
-      update.connection === "close" &&
-      !finished
-    ) {
-      clearTimeout(timeout);
-
-      const statusCode =
-        update.lastDisconnect?.error?.output?.statusCode;
-
-      if (statusCode === DisconnectReason.loggedOut) {
-        console.error(
-          "WhatsApp session logged out."
-        );
-      } else {
-        console.error(
-          "WhatsApp connection closed.",
-          statusCode || ""
-        );
-      }
-
+    } catch (error) {
+      console.error(
+        "Session saving failed:",
+        error.message
+      );
       process.exit(1);
     }
-  });
+  }
+
+  async function startSocket() {
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: "silent" })
+    });
+
+    sock.ev.on("creds.update", () => {
+      saveQueue = saveQueue.then(() => saveCreds());
+    });
+
+    sock.ev.on("connection.update", async update => {
+      if (
+        update.qr &&
+        !state.creds.registered &&
+        !pairingRequested
+      ) {
+        pairingRequested = true;
+
+        try {
+          await delay(1000);
+
+          const code = await sock.requestPairingCode(phone);
+
+          console.log("--------------------------------");
+          console.log("WhatsApp Pairing Code:", code);
+          console.log("--------------------------------");
+          console.log("Enter the code in WhatsApp.");
+
+        } catch (error) {
+          console.error(
+            "Pairing code error:",
+            error.message
+          );
+          process.exit(1);
+        }
+      }
+
+      if (update.connection === "open") {
+        console.log("WhatsApp connection is OPEN.");
+
+        await finishConnection(sock);
+      }
+
+      if (update.connection === "close") {
+        const code =
+          update.lastDisconnect?.error?.output?.statusCode;
+
+        console.log("Connection closed:", code);
+
+        // 515 يعني أن واتساب يطلب إعادة الاتصال
+        if (
+          code === DisconnectReason.restartRequired &&
+          !finished &&
+          !reconnecting
+        ) {
+          reconnecting = true;
+
+          try {
+            await saveQueue;
+            await saveCreds();
+
+            if (!state.creds.registered) {
+              throw new Error(
+                "New WhatsApp credentials were not saved."
+              );
+            }
+
+            console.log(
+              "Pairing accepted. Restarting socket..."
+            );
+
+            await startSocket();
+
+          } catch (error) {
+            console.error(
+              "Reconnect failed:",
+              error.message
+            );
+            process.exit(1);
+          }
+
+          return;
+        }
+
+        if (!finished) {
+          clearTimeout(timeout);
+
+          if (code === DisconnectReason.loggedOut) {
+            console.error("WhatsApp logged out.");
+          } else {
+            console.error(
+              "WhatsApp connection failed:",
+              code
+            );
+          }
+
+          process.exit(1);
+        }
+      }
+    });
+
+    return sock;
+  }
+
+  await startSocket();
 }
 
 main().catch(error => {
