@@ -1,10 +1,11 @@
+
 name: Send WhatsApp OTP
 
 on:
   workflow_dispatch:
     inputs:
       phone:
-        description: "Phone number with country code, digits only"
+        description: "Phone number with country code"
         required: true
         type: string
 
@@ -14,7 +15,7 @@ permissions:
 jobs:
   send-otp:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -33,4 +34,6 @@ jobs:
           PHONE: ${{ inputs.phone }}
           WHATSAPP_SESSION: ${{ secrets.WHATSAPP_SESSION }}
           SESSION_ENCRYPTION_KEY: ${{ secrets.SESSION_ENCRYPTION_KEY }}
+          GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: node src/send-otp.js
