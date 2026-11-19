@@ -146,7 +146,7 @@ async function main() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: ["OTP Gateway", "Chrome", "1.0.0"]
+    
   });
 
   sock.ev.on("creds.update", saveCreds);
