@@ -1,0 +1,38 @@
+
+name: WhatsApp Pairing
+
+on:
+  workflow_dispatch:
+    inputs:
+      phone:
+        description: "Phone number with country code, digits only"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  pairing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Connect WhatsApp and save session
+        env:
+          PAIRING_PHONE: ${{ inputs.phone }}
+          GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+          SESSION_ENCRYPTION_KEY: ${{ secrets.SESSION_ENCRYPTION_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node src/pair.js
