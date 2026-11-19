@@ -8,6 +8,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const axios = require("axios");
+const sodium = require("libsodium-wrappers");
 const { execFileSync } = require("child_process");
 const pino = require("pino");
 
@@ -15,12 +17,11 @@ const AUTH_DIR = path.join(process.cwd(), "auth_info");
 
 function required(name) {
   const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing ${name}`);
-  }
+  if (!value) throw new Error(`Missing ${name}`);
   return value;
 }
 
+// استعادة جلسة واتساب
 function restoreSession() {
   const key = Buffer.from(
     required("SESSION_ENCRYPTION_KEY"),
@@ -35,10 +36,6 @@ function restoreSession() {
     required("WHATSAPP_SESSION"),
     "base64"
   );
-
-  if (encrypted.length < 29) {
-    throw new Error("Invalid encrypted session");
-  }
 
   const iv = encrypted.subarray(0, 12);
   const tag = encrypted.subarray(12, 28);
@@ -56,6 +53,67 @@ function restoreSession() {
     decipher.update(data),
     decipher.final()
   ]);
+}
+
+// حفظ سجل OTP مشفرًا في GitHub Secrets
+async function saveOtpRecord(phone, otp) {
+  await sodium.ready;
+
+  const token = required("GH_SECRETS_TOKEN");
+  const repository = required("GITHUB_REPOSITORY");
+
+  const [owner, repo] = repository.split("/");
+
+  const api = axios.create({
+    baseURL: "https://api.github.com",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28"
+    },
+    timeout: 20000
+  });
+
+  const publicKeyResponse = await api.get(
+    `/repos/${owner}/${repo}/actions/secrets/public-key`
+  );
+
+  const publicKey = publicKeyResponse.data;
+
+  const salt = crypto.randomBytes(32).toString("hex");
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${salt}:${phone}:${otp}`)
+    .digest("hex");
+
+  const record = JSON.stringify({
+    phone,
+    salt,
+    hash,
+    expiresAt: Date.now() + 5 * 60 * 1000
+  });
+
+  const encrypted = sodium.crypto_box_seal(
+    sodium.from_string(record),
+    sodium.from_base64(
+      publicKey.key,
+      sodium.base64_variants.ORIGINAL
+    )
+  );
+
+  await api.put(
+    `/repos/${owner}/${repo}/actions/secrets/OTP_RECORD`,
+    {
+      encrypted_value: sodium.to_base64(
+        encrypted,
+        sodium.base64_variants.ORIGINAL
+      ),
+      key_id: publicKey.key_id
+    }
+  );
+
+  console.log("OTP verification record saved.");
 }
 
 async function main() {
@@ -76,9 +134,7 @@ async function main() {
 
   fs.writeFileSync(tempZip, zipData);
 
-  fs.mkdirSync(AUTH_DIR, {
-    recursive: true
-  });
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   execFileSync("unzip", [
     "-q",
@@ -111,80 +167,66 @@ async function main() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  let messageSent = false;
   let finished = false;
+  let messageSent = false;
 
   const timeout = setTimeout(() => {
     if (finished) return;
 
     finished = true;
-
     console.error("WhatsApp connection timed out.");
-
     sock.end(undefined);
     process.exit(1);
   }, 90000);
 
   sock.ev.on("connection.update", async update => {
-
     if (
       update.connection === "open" &&
       !messageSent &&
       !finished
     ) {
+      messageSent = true;
+
       try {
         console.log("WhatsApp connected.");
+
+        // حفظ سجل التحقق قبل إرسال الرمز
+        await saveOtpRecord(phone, otp);
 
         await sock.sendMessage(
           `${phone}@s.whatsapp.net`,
           {
             text:
               `رمز التحقق الخاص بك هو: ${otp}\n\n` +
-              "لا تشارك هذا الرمز مع أي شخص."
+              "الرمز صالح لمدة 5 دقائق. لا تشاركه مع أي شخص."
           }
         );
 
-        messageSent = true;
         finished = true;
-
         clearTimeout(timeout);
 
-        console.log("--------------------------------");
         console.log("OTP message sent successfully.");
-        console.log("--------------------------------");
 
         sock.end(undefined);
 
-        setTimeout(() => {
-          process.exit(0);
-        }, 1000);
+        setTimeout(() => process.exit(0), 1000);
 
       } catch (error) {
-        if (finished) return;
-
         finished = true;
         clearTimeout(timeout);
 
-        console.error(
-          "Message sending failed:",
-          error.message
-        );
+        console.error("OTP operation failed:", error.message);
 
         sock.end(undefined);
         process.exit(1);
       }
     }
 
-    if (update.connection === "close") {
-      if (finished) return;
-
+    if (update.connection === "close" && !finished) {
       finished = true;
       clearTimeout(timeout);
 
-      console.error(
-        "WhatsApp connection closed before sending."
-      );
-
+      console.error("WhatsApp connection closed before sending.");
       process.exit(1);
     }
   });
