@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#101827">
-  <title>التحقق عبر واتساب</title>
+  <title>WhatsApp OTP Verification</title>
 
   <style>
     * {
@@ -20,15 +20,15 @@
       align-items: center;
       justify-content: center;
       padding: 20px;
+      color: white;
       background:
         radial-gradient(circle at top, #1d3557, transparent 55%),
         #101827;
-      color: #fff;
     }
 
     .container {
       width: 100%;
-      max-width: 420px;
+      max-width: 430px;
       padding: 30px 24px;
       border: 1px solid #ffffff20;
       border-radius: 24px;
@@ -38,8 +38,8 @@
     }
 
     .logo {
-      width: 75px;
-      height: 75px;
+      width: 76px;
+      height: 76px;
       margin: 0 auto 18px;
       display: flex;
       align-items: center;
@@ -59,7 +59,7 @@
       text-align: center;
       color: #aab7ca;
       font-size: 13px;
-      line-height: 1.8;
+      line-height: 1.9;
       margin-bottom: 28px;
     }
 
@@ -120,9 +120,8 @@
       padding: 14px;
       border-radius: 12px;
       background: #ffffff0d;
-      color: #dce5f2;
       font-size: 13px;
-      line-height: 1.8;
+      line-height: 1.9;
       text-align: center;
       overflow-wrap: anywhere;
     }
@@ -150,14 +149,6 @@
       color: #718096;
       font-size: 11px;
     }
-
-    .note {
-      margin-top: 15px;
-      color: #aab7ca;
-      font-size: 12px;
-      line-height: 1.8;
-      text-align: center;
-    }
   </style>
 </head>
 
@@ -183,8 +174,8 @@
         id="phone"
         placeholder="9677XXXXXXXX"
         autocomplete="tel"
-        required
         maxlength="15"
+        required
       >
 
       <button type="submit" id="sendBtn">
@@ -195,24 +186,25 @@
 
     <div id="status" class="status"></div>
 
-    <p class="note">
-      تأكد من إدخال الرقم بصيغة دولية صحيحة،
-      وأن حساب واتساب يستقبل الرسائل.
-    </p>
-
     <div class="footer">
-      WhatsApp Verification System
+      WhatsApp OTP Verification
     </div>
 
   </main>
 
   <script>
+    /*
+      ضع هنا رابط الخادم الخلفي بعد نشره.
+      لا تضع GitHub Token أو أي سر في هذا الملف.
+    */
+    const API_BASE_URL = "https://YOUR-BACKEND-DOMAIN";
+
     const form = document.getElementById("otpForm");
     const phoneInput = document.getElementById("phone");
     const sendBtn = document.getElementById("sendBtn");
     const statusBox = document.getElementById("status");
 
-    let polling = false;
+    let requestRunning = false;
 
     function showStatus(message, type) {
       statusBox.textContent = message;
@@ -226,7 +218,7 @@
     form.addEventListener("submit", async function(event) {
       event.preventDefault();
 
-      if (polling) return;
+      if (requestRunning) return;
 
       const phone = phoneInput.value.replace(/\D/g, "");
 
@@ -235,20 +227,31 @@
         return;
       }
 
-      polling = true;
+      if (API_BASE_URL.includes("YOUR-BACKEND-DOMAIN")) {
+        showStatus(
+          "لم يتم إعداد رابط الخادم بعد. يجب نشر الخادم الخلفي أولاً.",
+          "error"
+        );
+        return;
+      }
+
+      requestRunning = true;
       sendBtn.disabled = true;
       sendBtn.textContent = "جارٍ إرسال الطلب...";
 
-      showStatus("جارٍ الاتصال بالخادم وتشغيل خدمة واتساب...", "loading");
-
       try {
-        const response = await fetch("/api/send-otp", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ phone })
-        });
+        showStatus("جارٍ الاتصال بالخادم...", "loading");
+
+        const response = await fetch(
+          API_BASE_URL + "/api/send-otp",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ phone })
+          }
+        );
 
         const data = await response.json();
 
@@ -257,10 +260,10 @@
         }
 
         if (!data.run_id) {
-          throw new Error("لم يتم الحصول على رقم تشغيل من الخادم");
+          throw new Error("لم يتم استلام رقم تشغيل الطلب");
         }
 
-        showStatus("تم تشغيل طلب الإرسال. ننتظر نتيجة واتساب...", "loading");
+        showStatus("تم تشغيل الطلب. ننتظر نتيجة واتساب...", "loading");
 
         let completed = false;
 
@@ -268,13 +271,16 @@
           await sleep(3000);
 
           const statusResponse = await fetch(
-            "/api/status/" + encodeURIComponent(data.run_id)
+            API_BASE_URL + "/api/status/" +
+            encodeURIComponent(data.run_id)
           );
 
           const statusData = await statusResponse.json();
 
           if (!statusResponse.ok) {
-            throw new Error(statusData.message || "تعذر متابعة حالة الإرسال");
+            throw new Error(
+              statusData.message || "تعذر متابعة حالة الطلب"
+            );
           }
 
           if (statusData.status === "completed") {
@@ -282,12 +288,12 @@
 
             if (statusData.conclusion === "success") {
               showStatus(
-                "اكتمل تشغيل الخدمة بنجاح. تحقق من رسائل واتساب لمعرفة ما إذا وصل رمز التحقق.",
+                "اكتمل تشغيل الخدمة بنجاح. تحقق من رسائل واتساب.",
                 "success"
               );
             } else {
               showStatus(
-                "لم تكتمل عملية إرسال الرسالة بنجاح. راجع سجل التشغيل لمعرفة السبب.",
+                "فشل تشغيل خدمة الإرسال. تحقق من سجل GitHub Actions.",
                 "error"
               );
             }
@@ -303,15 +309,15 @@
 
         if (!completed) {
           showStatus(
-            "استغرق الطلب وقتًا أطول من المتوقع. يمكنك مراجعة GitHub Actions.",
+            "انتهت مهلة الانتظار. تحقق من حالة الطلب في GitHub Actions.",
             "error"
           );
         }
 
       } catch (error) {
-        showStatus(error.message || "حدث خطأ غير متوقع.", "error");
+        showStatus(error.message || "حدث خطأ أثناء الاتصال بالخادم.", "error");
       } finally {
-        polling = false;
+        requestRunning = false;
         sendBtn.disabled = false;
         sendBtn.textContent = "إرسال رمز التحقق";
       }
